@@ -18,7 +18,7 @@ sniffs inbound UDP via a raw socket (no Npcap/driver needed) on the ports the ga
 busiest public IPs. Use the "Restart as admin" button. Without admin it falls back to the game's TCP peers
 (mostly Activision services, not the match server).
 
-Caveat: many game servers drop ICMP, so a detected server may show "timeout" even though it's the right IP.
+Caveat: many game servers drop ICMP. If a game server never answers, the app traces the path and pings the last router that does answer (the card says "blocks ping; showing hop N"). That measures your route up to the server's network, not the server itself. It re-checks direct ping every 30s.
 
 Games are matched by exe name; edit `games` in the config file to add more.
 

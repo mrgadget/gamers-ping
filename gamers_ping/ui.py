@@ -49,7 +49,10 @@ class Card(tk.Frame):
         t = self.target
         icon = {"gateway": "🏠 ", "game": "🎮 "}.get(t.kind, "🌐 ")
         self.title.config(text=icon + t.name, fg=GAME if t.kind == "game" else FG)
-        self.sub.config(text=t.host or "(no gateway found)")
+        sub = t.host or "(no gateway found)"
+        if t.via:
+            sub += f"  – blocks ping; showing hop {t.via_hop} ({t.via})"
+        self.sub.config(text=sub)
         values = t.recent(window)
         s = compute_stats(values)
         if not values:

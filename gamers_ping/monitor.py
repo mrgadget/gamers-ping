@@ -16,6 +16,9 @@ class Target:
         self.kind = kind  # "gateway" | "custom" | "game"
         self.samples: deque[tuple[float, float | None]] = deque(maxlen=MAX_SAMPLES)
         self.stop = threading.Event()
+        # Fallback when the host drops ICMP: ping the last router that answers instead.
+        self.via: str | None = None
+        self.via_hop: int | None = None
 
     def recent(self, n: int) -> list[float | None]:
         return [rtt for _, rtt in list(self.samples)[-n:]]
@@ -86,12 +89,26 @@ class Monitor:
 
     def _run(self, t: Target) -> None:
         pinger = Pinger()
+        misses, last_direct = 0, 0.0
         try:
             while not t.stop.is_set():
                 start = time.monotonic()
                 host = t.host
-                rtt = pinger.ping(host, self.settings["timeout_ms"]) if host else None
+                if t.via and start - last_direct > 30:  # periodically see if the host answers directly now
+                    last_direct = start
+                    if pinger.ping(host, self.settings["timeout_ms"]) is not None:
+                        t.via = t.via_hop = None
+                target = t.via or host
+                rtt = pinger.ping(target, self.settings["timeout_ms"]) if target else None
                 t.samples.append((time.time(), rtt))
+                misses = 0 if rtt is not None else misses + 1
+                if t.kind == "game" and not t.via and misses >= 5 and not any(v for _, v in t.samples):
+                    hop = pinger.last_responding_hop(host)
+                    if hop:
+                        t.via_hop, t.via = hop
+                        last_direct = time.monotonic()
+                        t.samples.clear()
+                    misses = 0
                 t.stop.wait(max(0.05, self.settings["interval_ms"] / 1000 - (time.monotonic() - start)))
         finally:
             pinger.close()
