@@ -1,8 +1,8 @@
 """tkinter front-end."""
 import ctypes
+import math
 import sys
 import tkinter as tk
-from tkinter import ttk
 
 from . import config
 from .gamedetect import GameDetector
@@ -12,6 +12,10 @@ from .netinfo import is_admin
 BG, CARD, FG, MUTED = "#14161a", "#1e2127", "#e6e6e6", "#8b93a1"
 GOOD, WARN, BAD, ACCENT = "#3fb950", "#d29922", "#f85149", "#58a6ff"
 GAME = "#bc8cff"
+
+MIN_CARD_W = 400   # narrowest a card gets before we drop a column
+MIN_GRAPH = 36
+CARD_H = 110       # card height with a minimal graph
 
 
 def latency_color(ms: float | None) -> str:
@@ -40,10 +44,11 @@ class Card(tk.Frame):
             x.bind("<Button-1>", lambda _e: on_remove(target))
         self.big = tk.Label(top, bg=CARD, font=("Segoe UI", 16, "bold"))
         self.big.pack(side="right", padx=12)
-        self.canvas = tk.Canvas(self, height=70, bg="#171a1f", highlightthickness=0)
-        self.canvas.pack(fill="x", pady=(6, 4))
+        self.canvas = tk.Canvas(self, height=MIN_GRAPH, bg="#171a1f", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, pady=(6, 4))
         self.stats = tk.Label(self, bg=CARD, fg=MUTED, font=("Consolas", 9), anchor="w")
         self.stats.pack(fill="x")
+        self.bind("<Configure>", lambda e: self.stats.config(wraplength=max(e.width - 24, 100)))
 
     def refresh(self, window: int):
         t = self.target
@@ -128,18 +133,10 @@ class App(tk.Tk):
                           bg=CARD, fg=FG, relief="flat", padx=8)
             b.pack(side="right")
 
-        outer = tk.Frame(self, bg=BG)
-        outer.pack(fill="both", expand=True)
-        self.scroll = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        sb = ttk.Scrollbar(outer, orient="vertical", command=self.scroll.yview)
-        self.body = tk.Frame(self.scroll, bg=BG)
-        self.body.bind("<Configure>", lambda _e: self.scroll.configure(scrollregion=self.scroll.bbox("all")))
-        win = self.scroll.create_window((0, 0), window=self.body, anchor="nw")
-        self.scroll.bind("<Configure>", lambda e: self.scroll.itemconfigure(win, width=e.width))
-        self.scroll.configure(yscrollcommand=sb.set)
-        self.scroll.pack(side="left", fill="both", expand=True, padx=(12, 0))
-        sb.pack(side="right", fill="y")
-        self.bind_all("<MouseWheel>", lambda e: self.scroll.yview_scroll(-1 * (e.delta // 120), "units"))
+        # Cards live in a grid that reflows to fit the window, so there is no scrolling.
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(fill="both", expand=True, padx=(12, 4))
+        self._layout_key = None
 
         bar = tk.Frame(self, bg=CARD, padx=12, pady=8)
         bar.pack(fill="x", side="bottom")
@@ -198,6 +195,27 @@ class App(tk.Tk):
         self.destroy()
 
     # --- refresh loop ---------------------------------------------------
+    def _arrange(self, live: list[Target]):
+        """Pick the column count: as many as fit the width, more if rows wouldn't fit the height."""
+        n = len(live)
+        if not n:
+            return
+        w, h = max(self.body.winfo_width(), 1), max(self.body.winfo_height(), 1)
+        cols = max(1, min(n, w // MIN_CARD_W))
+        while cols < n and math.ceil(n / cols) * CARD_H > h:
+            cols += 1
+        key = (cols, tuple(id(t) for t in live))
+        if key == self._layout_key:
+            return
+        self._layout_key = key
+        rows = math.ceil(n / cols)
+        for i in range(max(cols, 8)):
+            self.body.columnconfigure(i, weight=1 if i < cols else 0)
+        for i in range(max(rows, 20)):
+            self.body.rowconfigure(i, weight=1 if i < rows else 0)
+        for i, t in enumerate(live):
+            self.cards[t].grid(row=i // cols, column=i % cols, sticky="nsew", padx=(0, 8), pady=(0, 8))
+
     def _tick(self):
         live = self.monitor.targets()
         order = {"gateway": 0, "custom": 1, "game": 2}
@@ -208,10 +226,8 @@ class App(tk.Tk):
         for t in live:
             if t not in self.cards:
                 self.cards[t] = Card(self.body, t, self._remove)
+        self._arrange(live)
         for t in live:
-            self.cards[t].pack_forget()
-        for t in live:
-            self.cards[t].pack(fill="x", pady=(0, 8), padx=(0, 8))
             self.cards[t].refresh(self.cfg["window"])
 
         d = self.detector
