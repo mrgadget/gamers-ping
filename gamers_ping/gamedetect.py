@@ -112,9 +112,9 @@ class UdpSniffer:
 
 
 class GameDetector(threading.Thread):
-    def __init__(self, games: list[str], on_servers):
+    def __init__(self, games: dict[str, str], on_servers):
         super().__init__(daemon=True)
-        self.games = {g.lower() for g in games}
+        self.games = {k.lower(): v for k, v in games.items()}  # exe -> display name
         self.on_servers = on_servers  # callback(list[str])
         self.game: str | None = None
         self.mode = "idle"            # idle | udp | tcp
@@ -142,9 +142,9 @@ class GameDetector(threading.Thread):
     def _poll(self) -> list[str]:
         pids: dict[int, str] = {}
         for p in psutil.process_iter(["name"]):
-            name = (p.info["name"] or "").lower()
-            if name in self.games:
-                pids[p.pid] = name
+            label = self.games.get((p.info["name"] or "").lower())
+            if label:
+                pids[p.pid] = label
         if not pids:
             self.game, self.mode = None, "idle"
             self.sniffer.ports = frozenset()

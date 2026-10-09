@@ -20,7 +20,7 @@ busiest public IPs. Use the "Restart as admin" button. Without admin it falls ba
 
 Caveat: many game servers drop ICMP. If a game server never answers, the app traces the path and pings the last router that does answer (the card says "blocks ping; showing hop N"). That measures your route up to the server's network, not the server itself. It re-checks direct ping every 30s.
 
-Games are matched by exe name; edit `games` in the config file to add more.
+Built-in games: Call of Duty, Fortnite, Rust, CS2, Valorant, Apex, Overwatch 2, Rocket League, R6 Siege, PUBG, Marvel Rivals, Dota 2, LoL, Battlefield 2042, Destiny 2, Tarkov, GTA V, Halo Infinite, Helldivers 2, Deadlock, TF2, Delta Force. Add others by listing exe names under `games` in the config file.
 
 ## Tests
 

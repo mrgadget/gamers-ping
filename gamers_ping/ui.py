@@ -115,7 +115,7 @@ class App(tk.Tk):
         for t in self.cfg["targets"]:
             self.monitor.add(t["name"], t["host"], "custom")
         self._game_ips: list[str] = []
-        self.detector = GameDetector(self.cfg["games"], self._on_servers)
+        self.detector = GameDetector(self._games(), self._on_servers)
         self.detector.start()
         self.cards: dict[Target, Card] = {}
         self._build()
@@ -186,6 +186,12 @@ class App(tk.Tk):
         if ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, None, 1) > 32:
             self._close()
 
+    def _games(self) -> dict[str, str]:
+        games = dict(config.KNOWN_GAMES)
+        for exe in self.cfg.get("games", []):
+            games.setdefault(exe.lower(), exe)
+        return games
+
     def _on_servers(self, ips: list[str]):
         self.monitor.sync_game(ips)  # called from detector thread; Monitor is thread-safe
 
@@ -232,7 +238,7 @@ class App(tk.Tk):
 
         d = self.detector
         if d.game is None:
-            self.game_lbl.config(text="No game detected – start Call of Duty and servers appear automatically", fg=MUTED)
+            self.game_lbl.config(text="No game detected – launch a supported game (CoD, Fortnite, Rust, CS2…) and its servers appear automatically", fg=MUTED)
         elif d.mode == "udp":
             self.game_lbl.config(text=f"🎮 {d.game} running – tracking game servers (UDP)", fg=GAME)
         else:
