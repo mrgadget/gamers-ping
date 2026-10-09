@@ -124,7 +124,7 @@ class App(tk.Tk):
 
     # --- layout ---------------------------------------------------------
     def _build(self):
-        banner = tk.Frame(self, bg=BG, padx=12, pady=8)
+        banner = tk.Frame(self, bg=BG, padx=12, pady=4)
         banner.pack(fill="x")
         self.game_lbl = tk.Label(banner, bg=BG, fg=MUTED, font=("Segoe UI", 10, "bold"), anchor="w")
         self.game_lbl.pack(side="left")
@@ -238,7 +238,7 @@ class App(tk.Tk):
 
         d = self.detector
         if d.game is None:
-            self.game_lbl.config(text="No game detected – launch a supported game (CoD, Fortnite, Rust, CS2…) and its servers appear automatically", fg=MUTED)
+            self.game_lbl.config(text="")
         elif d.mode == "udp":
             self.game_lbl.config(text=f"🎮 {d.game} running – tracking game servers (UDP)", fg=GAME)
         else:
