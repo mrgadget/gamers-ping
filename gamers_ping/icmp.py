@@ -92,21 +92,23 @@ class Pinger:
         rtt, _, status = self.probe(host, 128, timeout_ms)
         return rtt if status == 0 else None
 
-    def last_responding_hop(self, host: str, max_ttl: int = 30, timeout_ms: int = 800):
-        """Traceroute; -> (hop_number, ip) of the farthest router that answers, or None.
+    def trace_hops(self, host: str, max_ttl: int = 30, timeout_ms: int = 800):
+        """Traceroute -> [(ttl, ip), ...] for every router that answered, in path order.
 
-        Stops early if the target itself answers (then no fallback is needed) or after
-        several silent hops in a row (the path is being filtered from here on).
+        Returns [] if the target itself answers (no fallback needed). Gives up after
+        several silent hops in a row (the path is filtered from there on).
         """
-        best, silent = None, 0
+        hops, silent = [], 0
         for ttl in range(1, max_ttl + 1):
             _, who, status = self.probe(host, ttl, timeout_ms)
             if status == 0:
-                return None
+                return []
             if status == _TTL_EXPIRED:
-                best, silent = (ttl, who), 0
+                silent = 0
+                if not hops or hops[-1][1] != who:
+                    hops.append((ttl, who))
             else:
                 silent += 1
                 if silent >= 6:
                     break
-        return best
+        return hops

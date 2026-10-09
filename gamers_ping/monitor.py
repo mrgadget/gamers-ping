@@ -19,6 +19,7 @@ class Target:
         # Fallback when the host drops ICMP: ping the last router that answers instead.
         self.via: str | None = None
         self.via_hop: int | None = None
+        self.hops: list[tuple[int, str]] = []  # candidate routers, nearest first
 
     def recent(self, n: int) -> list[float | None]:
         return [rtt for _, rtt in list(self.samples)[-n:]]
@@ -87,6 +88,18 @@ class Monitor:
             self._gateway.host = default_gateway()
             self._closed.wait(15)
 
+    def _use_farthest_answering(self, t: Target, pinger: Pinger) -> bool:
+        """Walk back along t.hops from the far end until a router answers a real ping."""
+        timeout = self.settings["timeout_ms"]
+        while t.hops:
+            ttl, ip = t.hops[-1]
+            if any(pinger.ping(ip, timeout) is not None for _ in range(2)):
+                t.via_hop, t.via = ttl, ip
+                return True
+            t.hops.pop()  # this router won't answer pings: go up a level
+        t.via = t.via_hop = None
+        return False
+
     def _run(self, t: Target) -> None:
         pinger = Pinger()
         misses, last_direct = 0, 0.0
@@ -98,17 +111,23 @@ class Monitor:
                     last_direct = start
                     if pinger.ping(host, self.settings["timeout_ms"]) is not None:
                         t.via = t.via_hop = None
+                        t.hops = []
                 target = t.via or host
                 rtt = pinger.ping(target, self.settings["timeout_ms"]) if target else None
                 t.samples.append((time.time(), rtt))
                 misses = 0 if rtt is not None else misses + 1
-                if t.kind == "game" and not t.via and misses >= 5 and not any(v for _, v in t.samples):
-                    hop = pinger.last_responding_hop(host)
-                    if hop:
-                        t.via_hop, t.via = hop
-                        last_direct = time.monotonic()
-                        t.samples.clear()
-                    misses = 0
+                if t.kind == "game" and misses >= 5:
+                    if t.via:  # chosen router went quiet: step back up the path
+                        if t.hops:
+                            t.hops.pop()
+                        self._use_farthest_answering(t, pinger)
+                        misses = 0
+                    elif not any(v for _, v in t.samples):  # never answered: trace the path
+                        t.hops = pinger.trace_hops(host)
+                        if self._use_farthest_answering(t, pinger):
+                            last_direct = time.monotonic()
+                            t.samples.clear()
+                        misses = 0
                 t.stop.wait(max(0.05, self.settings["interval_ms"] / 1000 - (time.monotonic() - start)))
         finally:
             pinger.close()
