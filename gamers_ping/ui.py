@@ -1,168 +1,359 @@
-"""tkinter front-end."""
+"""tkinter front-end: custom-drawn dark UI (rounded cards, filled graphs, status pills)."""
 import ctypes
 import math
 import sys
 import tkinter as tk
+from tkinter import font as tkfont
 
 from . import config
 from .gamedetect import GameDetector
 from .monitor import Monitor, Target, compute_stats
 from .netinfo import is_admin
 
-BG, CARD, FG, MUTED = "#14161a", "#1e2127", "#e6e6e6", "#8b93a1"
-GOOD, WARN, BAD, ACCENT = "#3fb950", "#d29922", "#f85149", "#58a6ff"
-GAME = "#bc8cff"
+# --- palette ------------------------------------------------------------
+BG, SURF, SURF2, GRAPH = "#0a0d14", "#111622", "#182032", "#0d121c"
+BORDER, GRID = "#1d2536", "#1a2232"
+FG, MUTED, DIM = "#e8ecf4", "#8a93a8", "#4d576c"
+GOOD, WARN, BAD, ACCENT, GAME = "#34d399", "#fbbf24", "#f87171", "#38bdf8", "#a78bfa"
 
-MIN_CARD_W = 400   # narrowest a card gets before we drop a column
-MIN_GRAPH = 36
-CARD_H = 110       # card height with a minimal graph
-
-
-def latency_color(ms: float | None) -> str:
-    if ms is None:
-        return BAD
-    return GOOD if ms < 50 else WARN if ms < 100 else BAD
+SCALE = 1.0  # set from the display DPI in App.__init__
+FONTS: dict[str, tkfont.Font] = {}
 
 
-def fmt(v, suffix="", digits=0):
-    return "–" if v is None else f"{v:.{digits}f}{suffix}"
+def px(n: float) -> int:
+    return int(round(n * SCALE))
 
 
-class Card(tk.Frame):
+def blend(a: str, b: str, t: float) -> str:
+    """Colour a mixed with b (t = share of a)."""
+    ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x * t + y * (1 - t)):02x}" for x, y in zip(ca, cb))
+
+
+def status(values: list, last) -> tuple[str, str]:
+    """-> (label, colour) for the newest sample."""
+    if not values:
+        return "STARTING", MUTED
+    if last is None:
+        return "NO REPLY", BAD
+    if last < 30:
+        return "EXCELLENT", GOOD
+    if last < 60:
+        return "GOOD", GOOD
+    if last < 100:
+        return "FAIR", WARN
+    return "POOR", BAD
+
+
+def fmt(v, digits=0) -> str:
+    return "–" if v is None else f"{v:.{digits}f}"
+
+
+def rrect(c: tk.Canvas, x1, y1, x2, y2, r, **kw):
+    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+           x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+    return c.create_polygon(pts, smooth=True, **kw)
+
+
+def make_fonts(root: tk.Tk) -> None:
+    fams = set(tkfont.families(root))
+    fam = next((f for f in ("Segoe UI Variable Display", "Segoe UI") if f in fams), "TkDefaultFont")
+
+    def f(size, weight="normal"):
+        return tkfont.Font(root=root, family=fam, size=-px(size), weight=weight)
+
+    FONTS.update(name=f(15, "bold"), host=f(12), big=f(40, "bold"), unit=f(14), tag=f(10, "bold"),
+                 cap=f(10, "bold"), val=f(13, "bold"), tiny=f(10), ui=f(13), ui_b=f(13, "bold"))
+
+
+class Card(tk.Canvas):
+    """One target: header, live readout + status pill, filled graph, stats footer."""
+
     def __init__(self, parent, target: Target, on_remove):
-        super().__init__(parent, bg=CARD, padx=12, pady=8)
-        self.target = target
-        top = tk.Frame(self, bg=CARD)
-        top.pack(fill="x")
-        self.title = tk.Label(top, bg=CARD, fg=FG, font=("Segoe UI", 11, "bold"), anchor="w")
-        self.title.pack(side="left")
-        self.sub = tk.Label(top, bg=CARD, fg=MUTED, font=("Segoe UI", 9), anchor="w")
-        self.sub.pack(side="left", padx=8)
-        if target.kind in ("custom", "game"):
-            x = tk.Label(top, text="✕", bg=CARD, fg=MUTED, cursor="hand2")
-            x.pack(side="right")
-            x.bind("<Button-1>", lambda _e: on_remove(target))
-        self.big = tk.Label(top, bg=CARD, font=("Segoe UI", 16, "bold"))
-        self.big.pack(side="right", padx=12)
-        self.canvas = tk.Canvas(self, height=MIN_GRAPH, bg="#171a1f", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, pady=(6, 4))
-        self.stats = tk.Label(self, bg=CARD, fg=MUTED, font=("Consolas", 9), anchor="w")
-        self.stats.pack(fill="x")
-        self.bind("<Configure>", lambda e: self.stats.config(wraplength=max(e.width - 24, 100)))
+        super().__init__(parent, bg=BG, highlightthickness=0, width=px(100), height=px(140))
+        self.target, self.on_remove = target, on_remove
+        self.hover = False
+        self._last = (120, 0)
+        self.removable = target.kind in ("custom", "game")
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Motion>", self._motion)
+        self.bind("<Button-1>", self._click)
+        self.bind("<Configure>", lambda _e: self.draw())
 
-    def refresh(self, window: int):
-        t = self.target
-        icon = {"gateway": "🏠 ", "game": "🎮 "}.get(t.kind, "🌐 ")
-        self.title.config(text=icon + t.name, fg=GAME if t.kind == "game" else FG)
-        sub = t.host or "(no gateway found)"
-        if t.via:
-            sub += f"  – blocks ping; showing hop {t.via_hop} ({t.via})"
-        self.sub.config(text=sub)
-        values = t.recent(window)
-        s = compute_stats(values)
-        if not values:
-            self.big.config(text="…", fg=MUTED)
-        elif s["last"] is None:
-            self.big.config(text="timeout", fg=BAD)
-        else:
-            self.big.config(text=f"{s['last']:.0f} ms", fg=latency_color(s["last"]))
-        self.stats.config(text=(
-            f"avg {fmt(s['avg'])}  min {fmt(s['min'])}  max {fmt(s['max'])} ms   "
-            f"jitter {fmt(s['jitter'], digits=1)} ms   loss {s['loss']:.1f}%   ({s['count']} samples)"))
-        self._draw(values, window)
+    def _set_hover(self, on: bool):
+        self.hover = on
+        self.draw()
 
-    def _draw(self, values, window):
-        c = self.canvas
+    def _on_x(self, e) -> bool:
+        return self.removable and e.x > self.winfo_width() - px(44) and e.y < px(44)
+
+    def _motion(self, e):
+        self.config(cursor="hand2" if self._on_x(e) else "")
+
+    def _click(self, e):
+        if self._on_x(e):
+            self.on_remove(self.target)
+
+    def draw(self, window=None, phase=0):
+        if window is None:
+            window, phase = self._last
+        self._last = (window, phase)
+        c, t = self, self.target
         c.delete("all")
         w, h = c.winfo_width(), c.winfo_height()
+        if w < px(80) or h < px(60):
+            return
+        values = t.recent(window)
+        st = compute_stats(values)
+        last = st["last"]
+        label, col = status(values, last)
+        is_game = t.kind == "game"
+        accent = GAME if is_game else col
+
+        # card surface
+        edge = blend(GAME, BORDER, 0.35) if is_game else BORDER
+        if self.hover:
+            edge = blend(FG, edge, 0.25)
+        rrect(c, 1, 1, w - 1, h - 1, px(14), fill=SURF, outline=edge)
+
+        # header: status dot, name, host
+        cy = px(24)
+        pulse = (math.sin(phase * 0.9) + 1) / 2 if is_game else 0
+        if is_game:
+            r = px(4 + 4 * pulse)
+            c.create_oval(px(22) - r, cy - r, px(22) + r, cy + r, fill=blend(GAME, SURF, 0.25 * (1 - pulse) + 0.1), outline="")
+        c.create_oval(px(22) - px(4), cy - px(4), px(22) + px(4), cy + px(4), fill=accent, outline="")
+        nx = px(36)
+        c.create_text(nx, cy, text=t.name, anchor="w", fill=FG, font=FONTS["name"])
+        nx += FONTS["name"].measure(t.name) + px(10)
+        c.create_text(nx, cy + px(1), text=t.host or "no gateway found", anchor="w", fill=MUTED, font=FONTS["host"])
+        tag = {"gateway": "GATEWAY", "game": "GAME SERVER"}.get(t.kind, "")
+        if self.hover and self.removable:
+            c.create_text(w - px(20), cy, text="✕", fill=MUTED, font=FONTS["ui_b"])
+        elif tag:
+            c.create_text(w - px(18), cy, text=tag, anchor="e", fill=GAME if is_game else DIM, font=FONTS["tag"])
+        top = px(46)
+        if t.via:
+            c.create_text(px(22), px(43), anchor="w", fill=WARN, font=FONTS["tiny"],
+                          text=f"Server blocks ping – measuring hop {t.via_hop} ({t.via})")
+            top = px(58)
+
+        # geometry
+        foot_y = h - px(19)
+        gb = h - px(36)
+        lw = px(124) if w >= px(340) else px(96)
+        gx1, gx2 = px(16) + lw, w - px(16)
+
+        # left: readout + pill
+        mid = (top + gb) / 2
+        roomy = gb - top >= px(56)
+        ny = mid - px(12) if roomy else mid
+        if last is None:
+            c.create_text(px(18), ny, text="–" if not values else "×", anchor="w", fill=col, font=FONTS["big"])
+        else:
+            num = f"{last:.0f}"
+            c.create_text(px(18), ny, text=num, anchor="w", fill=FG, font=FONTS["big"])
+            c.create_text(px(18) + FONTS["big"].measure(num) + px(4), ny + px(8), text="ms", anchor="w",
+                          fill=MUTED, font=FONTS["unit"])
+        if roomy:
+            py = mid + px(24)
+            pw = FONTS["tag"].measure(label) + px(18)
+            rrect(c, px(18), py - px(10), px(18) + pw, py + px(10), px(10), fill=blend(col, SURF, 0.16), outline="")
+            c.create_text(px(18) + pw / 2, py, text=label, fill=col, font=FONTS["tag"])
+
+        # graph
+        rrect(c, gx1, top, gx2, gb, px(10), fill=GRAPH, outline="")
+        x0, x1 = gx1 + px(8), gx2 - px(8)
+        y0, y1 = top + px(10), gb - px(10)
         ok = [v for v in values if v is not None]
-        ymax = max(60.0, (max(ok) if ok else 0) * 1.15)
-        step = w / max(window - 1, 1)
+        ymax = max(60.0, (max(ok) if ok else 0) * 1.2)
+        step = (x1 - x0) / max(window - 1, 1)
 
-        def y(ms):
-            return h - 4 - (h - 8) * min(ms, ymax) / ymax
+        def Y(ms):
+            return y1 - (y1 - y0) * min(ms, ymax) / ymax
 
-        for ms in (50, 100, 200):
-            if ms < ymax:
-                c.create_line(0, y(ms), w, y(ms), fill="#2a2f37", dash=(2, 4))
-                c.create_text(4, y(ms) - 6, text=str(ms), fill="#4a515c", anchor="w", font=("Segoe UI", 7))
+        for ms in (50, 100, 200, 400):
+            if ms < ymax * 0.97:
+                c.create_line(x0, Y(ms), x1, Y(ms), fill=GRID, dash=(2, 5))
+                c.create_text(x0, Y(ms) - px(7), text=f"{ms}", anchor="w", fill=DIM, font=FONTS["tiny"])
+
         n = len(values)
-        seg: list[float] = []
+        runs: list[list[tuple[float, float, float]]] = []  # contiguous (x, y, ms)
+        cur: list[tuple[float, float, float]] = []
         for i, v in enumerate(values):
-            x = w - (n - 1 - i) * step
+            x = x1 - (n - 1 - i) * step
             if v is None:
-                if len(seg) >= 4:
-                    c.create_line(*seg, fill=ACCENT, width=2)
-                seg = []
-                c.create_rectangle(x - 1, 0, x + 1, h, fill=BAD, outline="")
+                if cur:
+                    runs.append(cur)
+                cur = []
+                c.create_rectangle(x - px(1), y0 - px(4), x + px(1), y1 + px(4),
+                                   fill=blend(BAD, GRAPH, 0.7), outline="")
             else:
-                seg += [x, y(v)]
-        if len(seg) >= 4:
-            c.create_line(*seg, fill=ACCENT, width=2)
-        elif len(seg) == 2:
-            c.create_oval(seg[0] - 2, seg[1] - 2, seg[0] + 2, seg[1] + 2, fill=ACCENT, outline="")
+                cur.append((x, Y(v), v))
+        if cur:
+            runs.append(cur)
+        for run in runs:
+            if len(run) > 1:  # soft area fill under the line
+                flat = [p for x, y, _ in run for p in (x, y)]
+                c.create_polygon(*flat, run[-1][0], y1 + px(10), run[0][0], y1 + px(10),
+                                 fill=blend(accent, GRAPH, 0.13), outline="")
+        for run in runs:
+            seg = [run[0]]
+            for p in run[1:]:
+                seg.append(p)
+                if status([1], p[2])[1] != status([1], seg[0][2])[1] or len(seg) > 40:
+                    self._line(seg)
+                    seg = [p]
+            self._line(seg)
+        if runs and values and values[-1] is not None:
+            lx, ly, _ = runs[-1][-1]
+            c.create_oval(lx - px(6), ly - px(6), lx + px(6), ly + px(6), fill=blend(col, GRAPH, 0.28), outline="")
+            c.create_oval(lx - px(3), ly - px(3), lx + px(3), ly + px(3), fill=col, outline="")
+
+        # footer stats
+        cells = [("AVG", fmt(st["avg"]), FG), ("MIN", fmt(st["min"]), FG), ("MAX", fmt(st["max"]), FG),
+                 ("JITTER", fmt(st["jitter"], 1), WARN if (st["jitter"] or 0) > 15 else FG),
+                 ("LOSS", f"{st['loss']:.1f}%", BAD if st["loss"] > 2 else WARN if st["loss"] > 0 else GOOD)]
+        if w < px(400):
+            cells.pop(1)
+        cw = (w - px(36)) / len(cells)
+        for i, (cap, val, vcol) in enumerate(cells):
+            x = px(18) + i * cw
+            c.create_text(x, foot_y, text=cap, anchor="w", fill=DIM, font=FONTS["cap"])
+            c.create_text(x + FONTS["cap"].measure(cap) + px(6), foot_y, text=val, anchor="w", fill=vcol, font=FONTS["val"])
+
+    def _line(self, seg):
+        if len(seg) == 1:
+            x, y, ms = seg[0]
+            self.create_oval(x - px(1.5), y - px(1.5), x + px(1.5), y + px(1.5), fill=status([1], ms)[1], outline="")
+            return
+        flat = [p for x, y, _ in seg for p in (x, y)]
+        self.create_line(*flat, fill=status([1], seg[-1][2])[1], width=px(2), capstyle="round", joinstyle="round")
+
+
+class FlatButton(tk.Label):
+    def __init__(self, parent, text, command, bg=SURF2, fg=FG, hover=None, font=None, padx=14, pady=6):
+        super().__init__(parent, text=text, bg=bg, fg=fg, font=font or FONTS["ui_b"], padx=px(padx), pady=px(pady),
+                         cursor="hand2")
+        hover = hover or blend(FG, bg, 0.12)
+        self.bind("<Enter>", lambda _e: self.config(bg=hover))
+        self.bind("<Leave>", lambda _e: self.config(bg=bg))
+        self.bind("<Button-1>", lambda _e: command())
+
+
+class HintEntry(tk.Entry):
+    def __init__(self, parent, hint, width, on_return):
+        super().__init__(parent, width=width, bg=SURF2, fg=DIM, insertbackground=FG, relief="flat",
+                         font=FONTS["ui"], highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+        self.hint, self.showing = hint, False
+        self.bind("<FocusIn>", self._in)
+        self.bind("<FocusOut>", self._out)
+        self.bind("<Return>", lambda _e: on_return())
+        self._out()
+
+    def _in(self, _e=None):
+        if self.showing:
+            self.delete(0, "end")
+            self.config(fg=FG)
+            self.showing = False
+
+    def _out(self, _e=None):
+        if not self.get():
+            self.insert(0, self.hint)
+            self.config(fg=DIM)
+            self.showing = True
+
+    def value(self) -> str:
+        return "" if self.showing else self.get().strip()
+
+    def clear(self):
+        self.delete(0, "end")
+        self.showing = False
+        if self.focus_get() is not self:
+            self._out()
 
 
 class App(tk.Tk):
     def __init__(self):
+        global SCALE
         super().__init__()
+        SCALE = max(1.0, self.winfo_fpixels("1i") / 96.0)
+        make_fonts(self)
         self.title("Gamers Ping")
         self.configure(bg=BG)
-        self.geometry("760x820")
-        self.minsize(560, 400)
+        self.geometry(f"{px(1000)}x{px(620)}")
+        self.minsize(px(480), px(360))
         self.cfg = config.load()
         self.monitor = Monitor(self.cfg)
         for t in self.cfg["targets"]:
             self.monitor.add(t["name"], t["host"], "custom")
-        self._game_ips: list[str] = []
         self.detector = GameDetector(self._games(), self._on_servers)
         self.detector.start()
         self.cards: dict[Target, Card] = {}
+        self._frame = 0
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.after(50, self._style_titlebar)
         self.after(300, self._tick)
+
+    def _style_titlebar(self):
+        """Dark caption bar on Windows 10 20H1+/11."""
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            dwm = ctypes.windll.dwmapi
+            one = ctypes.c_int(1)
+            for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(one), 4)
+            rgb = int(BG[1:3], 16) | int(BG[3:5], 16) << 8 | int(BG[5:7], 16) << 16
+            for attr in (34, 35):  # border / caption colour (Windows 11)
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(rgb)), 4)
+        except (AttributeError, OSError):
+            pass
 
     # --- layout ---------------------------------------------------------
     def _build(self):
-        banner = tk.Frame(self, bg=BG, padx=12, pady=4)
-        banner.pack(fill="x")
-        self.game_lbl = tk.Label(banner, bg=BG, fg=MUTED, font=("Segoe UI", 10, "bold"), anchor="w")
-        self.game_lbl.pack(side="left")
+        top = tk.Frame(self, bg=BG)
+        top.pack(fill="x", padx=px(16), pady=(px(10), px(2)))
+        self.chip = tk.Label(top, bg=BG, fg=GAME, font=FONTS["ui_b"], padx=px(12), pady=px(4))
         if not is_admin():
-            b = tk.Button(banner, text="Restart as admin (enables UDP server detection)", command=self._elevate,
-                          bg=CARD, fg=FG, relief="flat", padx=8)
-            b.pack(side="right")
+            FlatButton(top, "Run as admin for UDP game-server detection", self._elevate, bg=SURF, fg=MUTED,
+                       font=FONTS["tiny"], padx=12, pady=4).pack(side="right")
 
         # Cards live in a grid that reflows to fit the window, so there is no scrolling.
         self.body = tk.Frame(self, bg=BG)
-        self.body.pack(fill="both", expand=True, padx=(12, 4))
+        self.body.pack(fill="both", expand=True, padx=(px(16), px(6)), pady=(px(6), 0))
         self._layout_key = None
 
-        bar = tk.Frame(self, bg=CARD, padx=12, pady=8)
-        bar.pack(fill="x", side="bottom")
-        self.name_var, self.host_var = tk.StringVar(), tk.StringVar()
-        tk.Label(bar, text="Add target:", bg=CARD, fg=MUTED).pack(side="left")
-        for var, width, hint in ((self.name_var, 14, "name"), (self.host_var, 20, "IP / hostname")):
-            e = tk.Entry(bar, textvariable=var, width=width, bg=BG, fg=FG, insertbackground=FG, relief="flat")
-            e.pack(side="left", padx=4, ipady=3)
-            e.bind("<Return>", lambda _e: self._add())
-        tk.Button(bar, text="Add", command=self._add, bg=ACCENT, fg="#0b0d10", relief="flat", padx=10).pack(side="left")
-        self.interval_var = tk.IntVar(value=self.cfg["interval_ms"])
-        tk.Spinbox(bar, from_=100, to=10000, increment=100, width=6, textvariable=self.interval_var,
-                   command=self._interval_changed, bg=BG, fg=FG, relief="flat").pack(side="right")
-        tk.Label(bar, text="Interval (ms):", bg=CARD, fg=MUTED).pack(side="right", padx=4)
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="x", side="bottom", padx=px(16), pady=(px(4), px(14)))
+        bar = tk.Frame(outer, bg=SURF, highlightthickness=1, highlightbackground=BORDER, padx=px(10), pady=px(8))
+        bar.pack(fill="x")
+        self.name_in = HintEntry(bar, "Name", 14, self._add)
+        self.host_in = HintEntry(bar, "IP or hostname", 22, self._add)
+        self.name_in.pack(side="left", ipady=px(4))
+        self.host_in.pack(side="left", padx=px(8), ipady=px(4))
+        FlatButton(bar, "+  Add target", self._add, bg=ACCENT, fg="#06121c", hover=blend("#ffffff", ACCENT, 0.2)).pack(side="left")
+
+        self.interval_lbl = tk.Label(bar, bg=SURF, fg=FG, font=FONTS["ui_b"], width=8)
+        FlatButton(bar, "+", lambda: self._step(+1), padx=10, pady=3).pack(side="right")
+        self.interval_lbl.pack(side="right")
+        FlatButton(bar, "–", lambda: self._step(-1), padx=10, pady=3).pack(side="right")
+        tk.Label(bar, text="PING EVERY", bg=SURF, fg=DIM, font=FONTS["cap"]).pack(side="right", padx=(0, px(10)))
+        self._show_interval()
 
     # --- actions --------------------------------------------------------
     def _add(self):
-        host = self.host_var.get().strip()
+        host = self.host_in.value()
         if not host:
             return
-        name = self.name_var.get().strip() or host
+        name = self.name_in.value() or host
         self.monitor.add(name, host, "custom")
         self.cfg["targets"].append({"name": name, "host": host})
         config.save(self.cfg)
-        self.name_var.set("")
-        self.host_var.set("")
+        self.name_in.clear()
+        self.host_in.clear()
 
     def _remove(self, target: Target):
         self.monitor.remove(target)
@@ -171,12 +362,15 @@ class App(tk.Tk):
                                    if not (t["host"] == target.host and t["name"] == target.name)]
             config.save(self.cfg)
 
-    def _interval_changed(self):
-        try:
-            self.cfg["interval_ms"] = max(100, int(self.interval_var.get()))
-            config.save(self.cfg)
-        except (tk.TclError, ValueError):
-            pass
+    def _step(self, direction: int):
+        ms = self.cfg["interval_ms"]
+        inc = 100 if (ms < 1000 or (ms == 1000 and direction < 0)) else 250
+        self.cfg["interval_ms"] = max(100, min(10000, ms + direction * inc))
+        config.save(self.cfg)
+        self._show_interval()
+
+    def _show_interval(self):
+        self.interval_lbl.config(text=f"{self.cfg['interval_ms']} ms")
 
     def _elevate(self):
         if getattr(sys, "frozen", False):
@@ -202,27 +396,31 @@ class App(tk.Tk):
 
     # --- refresh loop ---------------------------------------------------
     def _arrange(self, live: list[Target]):
-        """Pick the column count: as many as fit the width, more if rows wouldn't fit the height."""
+        """Columns: as many as fit the width (more if rows wouldn't fit the height); card height fills the rest."""
         n = len(live)
         if not n:
             return
+        gap = px(10)
         w, h = max(self.body.winfo_width(), 1), max(self.body.winfo_height(), 1)
-        cols = max(1, min(n, w // MIN_CARD_W))
-        while cols < n and math.ceil(n / cols) * CARD_H > h:
+        min_h = px(140)
+        cols = max(1, min(n, w // px(440)))
+        while cols < n and math.ceil(n / cols) * (min_h + gap) > h:
             cols += 1
-        key = (cols, tuple(id(t) for t in live))
+        rows = math.ceil(n / cols)
+        card_h = int(max(min_h, min(px(230), h / rows - gap)))
+        key = (cols, card_h, tuple(id(t) for t in live))
         if key == self._layout_key:
             return
         self._layout_key = key
-        rows = math.ceil(n / cols)
         for i in range(max(cols, 8)):
             self.body.columnconfigure(i, weight=1 if i < cols else 0)
-        for i in range(max(rows, 20)):
-            self.body.rowconfigure(i, weight=1 if i < rows else 0)
         for i, t in enumerate(live):
-            self.cards[t].grid(row=i // cols, column=i % cols, sticky="nsew", padx=(0, 8), pady=(0, 8))
+            card = self.cards[t]
+            card.config(height=card_h)
+            card.grid(row=i // cols, column=i % cols, sticky="new", padx=(0, gap), pady=(0, gap))
 
     def _tick(self):
+        self._frame += 1
         live = self.monitor.targets()
         order = {"gateway": 0, "custom": 1, "game": 2}
         live.sort(key=lambda t: order[t.kind])
@@ -234,19 +432,24 @@ class App(tk.Tk):
                 self.cards[t] = Card(self.body, t, self._remove)
         self._arrange(live)
         for t in live:
-            self.cards[t].refresh(self.cfg["window"])
+            self.cards[t].draw(self.cfg["window"], self._frame)
 
         d = self.detector
         if d.game is None:
-            self.game_lbl.config(text="")
-        elif d.mode == "udp":
-            self.game_lbl.config(text=f"🎮 {d.game} running – tracking game servers (UDP)", fg=GAME)
+            self.chip.pack_forget()
         else:
-            why = d.sniffer.error or "starting"
-            self.game_lbl.config(
-                text=f"🎮 {d.game} running – TCP peers only (UDP sniffing off: {why})", fg=WARN)
+            if d.mode == "udp":
+                text, col = f"●  {d.game}  ·  tracking servers", GAME
+            else:
+                text, col = f"●  {d.game}  ·  TCP peers only ({d.sniffer.error or 'starting'})", WARN
+            self.chip.config(text=text, fg=col, bg=blend(col, BG, 0.14))
+            self.chip.pack(side="left")
         self.after(500, self._tick)
 
 
 def main():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # crisp text/graphs on high-DPI displays
+    except (AttributeError, OSError):
+        pass
     App().mainloop()

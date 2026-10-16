@@ -107,13 +107,16 @@ class Monitor:
             while not t.stop.is_set():
                 start = time.monotonic()
                 host = t.host
+                if host is None:  # e.g. gateway not resolved yet: don't count it as loss
+                    t.stop.wait(0.2)
+                    continue
                 if t.via and start - last_direct > 30:  # periodically see if the host answers directly now
                     last_direct = start
                     if pinger.ping(host, self.settings["timeout_ms"]) is not None:
                         t.via = t.via_hop = None
                         t.hops = []
                 target = t.via or host
-                rtt = pinger.ping(target, self.settings["timeout_ms"]) if target else None
+                rtt = pinger.ping(target, self.settings["timeout_ms"])
                 t.samples.append((time.time(), rtt))
                 misses = 0 if rtt is not None else misses + 1
                 if t.kind == "game" and misses >= 5:
