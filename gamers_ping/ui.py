@@ -58,6 +58,27 @@ def rrect(c: tk.Canvas, x1, y1, x2, y2, r, **kw):
     return c.create_polygon(pts, smooth=True, **kw)
 
 
+def clip_run(run, xl, xr):
+    """Clip a left-to-right polyline of (x, y, value) to xl..xr, interpolating at the cut edges."""
+    if len(run) == 1:
+        return run if xl <= run[0][0] <= xr else []
+    out = []
+    for a, b in zip(run, run[1:]):
+        if b[0] < xl or a[0] > xr or b[0] == a[0]:
+            continue
+
+        def at(x, a=a, b=b):
+            f = (x - a[0]) / (b[0] - a[0])
+            return (x, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f)
+
+        p = a if a[0] >= xl else at(xl)
+        q = b if b[0] <= xr else at(xr)
+        if not out or out[-1] != p:
+            out.append(p)
+        out.append(q)
+    return out
+
+
 def make_fonts(root: tk.Tk) -> None:
     fams = set(tkfont.families(root))
     fam = next((f for f in ("Segoe UI Variable Display", "Segoe UI") if f in fams), "TkDefaultFont")
@@ -65,7 +86,7 @@ def make_fonts(root: tk.Tk) -> None:
     def f(size, weight="normal"):
         return tkfont.Font(root=root, family=fam, size=-px(size), weight=weight)
 
-    FONTS.update(name=f(15, "bold"), host=f(12), big=f(40, "bold"), unit=f(14), tag=f(10, "bold"),
+    FONTS.update(name=f(15, "bold"), host=f(12), big=f(40, "bold"), unit=f(14), big2=f(54, "bold"), unit2=f(18), big3=f(70, "bold"), unit3=f(22), tag=f(10, "bold"),
                  cap=f(10, "bold"), val=f(13, "bold"), tiny=f(10), ui=f(13), ui_b=f(13, "bold"))
 
 
@@ -76,7 +97,10 @@ class Card(tk.Canvas):
         super().__init__(parent, bg=BG, highlightthickness=0, width=px(100), height=px(140))
         self.target, self.on_remove = target, on_remove
         self.hover = False
-        self._last = (120, 0)
+        self._last = (120, 0, 1.0)
+        self.window, self.interval = 120, 1.0
+        self._geo: dict | None = None
+        self._ymax = 60.0
         self.removable = target.kind in ("custom", "game")
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
@@ -98,10 +122,11 @@ class Card(tk.Canvas):
         if self._on_x(e):
             self.on_remove(self.target)
 
-    def draw(self, window=None, phase=0):
+    def draw(self, window=None, phase=0, interval=None):
         if window is None:
-            window, phase = self._last
-        self._last = (window, phase)
+            window, phase, interval = self._last
+        self._last = (window, phase, interval)
+        self.window, self.interval = window, interval
         c, t = self, self.target
         c.delete("all")
         w, h = c.winfo_width(), c.winfo_height()
@@ -146,73 +171,36 @@ class Card(tk.Canvas):
         foot_y = h - px(19)
         gb = h - px(36)
         lw = px(124) if w >= px(340) else px(96)
+        if h > px(170) and w >= px(420):
+            lw = px(176)
         gx1, gx2 = px(16) + lw, w - px(16)
 
         # left: readout + pill
         mid = (top + gb) / 2
         roomy = gb - top >= px(56)
         ny = mid - px(12) if roomy else mid
+        size = "3" if gb - top > px(260) else "2" if gb - top > px(170) else ""
+        fbig, funit = FONTS["big" + size], FONTS["unit" + size]
+        if size:
+            ny = mid - px(16 if size == "2" else 24)
         if last is None:
-            c.create_text(px(18), ny, text="–" if not values else "×", anchor="w", fill=col, font=FONTS["big"])
+            c.create_text(px(18), ny, text="–" if not values else "×", anchor="w", fill=col, font=fbig)
         else:
             num = f"{last:.0f}"
-            c.create_text(px(18), ny, text=num, anchor="w", fill=FG, font=FONTS["big"])
-            c.create_text(px(18) + FONTS["big"].measure(num) + px(4), ny + px(8), text="ms", anchor="w",
-                          fill=MUTED, font=FONTS["unit"])
+            c.create_text(px(18), ny, text=num, anchor="w", fill=FG, font=fbig)
+            c.create_text(px(18) + fbig.measure(num) + px(4), ny + fbig.metrics("linespace") * 0.2, text="ms", anchor="w",
+                          fill=MUTED, font=funit)
         if roomy:
-            py = mid + px(24)
+            py = mid + px(24 if not size else 34 if size == "2" else 48)
             pw = FONTS["tag"].measure(label) + px(18)
             rrect(c, px(18), py - px(10), px(18) + pw, py + px(10), px(10), fill=blend(col, SURF, 0.16), outline="")
             c.create_text(px(18) + pw / 2, py, text=label, fill=col, font=FONTS["tag"])
 
-        # graph
+        # graph backdrop (the moving plot is drawn by plot(), ~30 fps)
         rrect(c, gx1, top, gx2, gb, px(10), fill=GRAPH, outline="")
-        x0, x1 = gx1 + px(8), gx2 - px(8)
-        y0, y1 = top + px(10), gb - px(10)
-        ok = [v for v in values if v is not None]
-        ymax = max(60.0, (max(ok) if ok else 0) * 1.2)
-        step = (x1 - x0) / max(window - 1, 1)
-
-        def Y(ms):
-            return y1 - (y1 - y0) * min(ms, ymax) / ymax
-
-        for ms in (50, 100, 200, 400):
-            if ms < ymax * 0.97:
-                c.create_line(x0, Y(ms), x1, Y(ms), fill=GRID, dash=(2, 5))
-                c.create_text(x0, Y(ms) - px(7), text=f"{ms}", anchor="w", fill=DIM, font=FONTS["tiny"])
-
-        n = len(values)
-        runs: list[list[tuple[float, float, float]]] = []  # contiguous (x, y, ms)
-        cur: list[tuple[float, float, float]] = []
-        for i, v in enumerate(values):
-            x = x1 - (n - 1 - i) * step
-            if v is None:
-                if cur:
-                    runs.append(cur)
-                cur = []
-                c.create_rectangle(x - px(1), y0 - px(4), x + px(1), y1 + px(4),
-                                   fill=blend(BAD, GRAPH, 0.7), outline="")
-            else:
-                cur.append((x, Y(v), v))
-        if cur:
-            runs.append(cur)
-        for run in runs:
-            if len(run) > 1:  # soft area fill under the line
-                flat = [p for x, y, _ in run for p in (x, y)]
-                c.create_polygon(*flat, run[-1][0], y1 + px(10), run[0][0], y1 + px(10),
-                                 fill=blend(accent, GRAPH, 0.13), outline="")
-        for run in runs:
-            seg = [run[0]]
-            for p in run[1:]:
-                seg.append(p)
-                if status([1], p[2])[1] != status([1], seg[0][2])[1] or len(seg) > 40:
-                    self._line(seg)
-                    seg = [p]
-            self._line(seg)
-        if runs and values and values[-1] is not None:
-            lx, ly, _ = runs[-1][-1]
-            c.create_oval(lx - px(6), ly - px(6), lx + px(6), ly + px(6), fill=blend(col, GRAPH, 0.28), outline="")
-            c.create_oval(lx - px(3), ly - px(3), lx + px(3), ly + px(3), fill=col, outline="")
+        self._geo = dict(x0=gx1 + px(8), x1=gx2 - px(8), y0=top + px(10), y1=gb - px(10),
+                         accent=accent, col=col)
+        self.plot()
 
         # footer stats
         cells = [("AVG", fmt(st["avg"]), FG), ("MIN", fmt(st["min"]), FG), ("MAX", fmt(st["max"]), FG),
@@ -226,13 +214,88 @@ class Card(tk.Canvas):
             c.create_text(x, foot_y, text=cap, anchor="w", fill=DIM, font=FONTS["cap"])
             c.create_text(x + FONTS["cap"].measure(cap) + px(6), foot_y, text=val, anchor="w", fill=vcol, font=FONTS["val"])
 
+    def plot(self, now: float | None = None, ease: bool = False):
+        """Draw the scrolling graph from timestamps, so it glides instead of stepping.
+
+        The right edge shows time `now - interval`: the newest sample is always already
+        in hand and the final segment slides in from the edge.
+        """
+        g = self._geo
+        if not g:
+            return
+        c = self
+        c.delete("g")
+        now = now or time.time()
+        x0, x1, y0, y1, accent, col = g["x0"], g["x1"], g["y0"], g["y1"], g["accent"], g["col"]
+        interval = max(self.interval, 0.05)
+        span = max(self.window - 1, 1) * interval
+        edge = now - interval
+        pps = (x1 - x0) / span
+
+        pts: list[tuple[float, float | None]] = []
+        cutoff = edge - span - interval
+        for ts, v in reversed(self.target.samples):
+            if ts < cutoff:
+                break
+            pts.append((ts, v))
+        pts.reverse()
+        ok = [v for _, v in pts if v is not None]
+        want = max(60.0, (max(ok) if ok else 0) * 1.2)
+        self._ymax += (want - self._ymax) * (0.12 if ease else 1.0)
+        ymax = self._ymax
+
+        def Y(ms):
+            return y1 - (y1 - y0) * min(ms, ymax) / ymax
+
+        for ms in (50, 100, 200, 400):
+            if ms < ymax * 0.97:
+                c.create_line(x0, Y(ms), x1, Y(ms), fill=GRID, dash=(2, 5), tags="g")
+                c.create_text(x0, Y(ms) - px(7), text=f"{ms}", anchor="w", fill=DIM, font=FONTS["tiny"], tags="g")
+
+        runs: list[list[tuple[float, float, float]]] = []
+        cur: list[tuple[float, float, float]] = []
+        for ts, v in pts:
+            x = x1 - (edge - ts) * pps
+            if v is None:
+                if cur:
+                    runs.append(cur)
+                cur = []
+                if x0 <= x <= x1:
+                    c.create_rectangle(x - px(1), y0 - px(4), x + px(1), y1 + px(4),
+                                       fill=blend(BAD, GRAPH, 0.7), outline="", tags="g")
+            else:
+                cur.append((x, Y(v), v))
+        if cur:
+            runs.append(cur)
+        runs = [r for r in (clip_run(r, x0, x1) for r in runs) if r]
+        for run in runs:
+            if len(run) > 1:  # soft area fill under the line
+                flat = [p for x, y, _ in run for p in (x, y)]
+                c.create_polygon(*flat, run[-1][0], y1 + px(10), run[0][0], y1 + px(10),
+                                 fill=blend(accent, GRAPH, 0.13), outline="", tags="g")
+        for run in runs:
+            seg = [run[0]]
+            for p in run[1:]:
+                seg.append(p)
+                if status([1], p[2])[1] != status([1], seg[0][2])[1] or len(seg) > 40:
+                    self._line(seg)
+                    seg = [p]
+            self._line(seg)
+        if runs and pts and pts[-1][1] is not None and abs(runs[-1][-1][0] - x1) < px(2):
+            lx, ly, _ = runs[-1][-1]
+            c.create_oval(lx - px(6), ly - px(6), lx + px(6), ly + px(6), fill=blend(col, GRAPH, 0.28),
+                          outline="", tags="g")
+            c.create_oval(lx - px(3), ly - px(3), lx + px(3), ly + px(3), fill=col, outline="", tags="g")
+
     def _line(self, seg):
         if len(seg) == 1:
             x, y, ms = seg[0]
-            self.create_oval(x - px(1.5), y - px(1.5), x + px(1.5), y + px(1.5), fill=status([1], ms)[1], outline="")
+            self.create_oval(x - px(1.5), y - px(1.5), x + px(1.5), y + px(1.5), fill=status([1], ms)[1],
+                             outline="", tags="g")
             return
         flat = [p for x, y, _ in seg for p in (x, y)]
-        self.create_line(*flat, fill=status([1], seg[-1][2])[1], width=px(2), capstyle="round", joinstyle="round")
+        self.create_line(*flat, fill=status([1], seg[-1][2])[1], width=px(2), capstyle="round",
+                         joinstyle="round", tags="g")
 
 
 class FlatButton(tk.Label):
@@ -300,6 +363,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(50, self._style_titlebar)
         self.after(300, self._tick)
+        self.after(300, self._animate)
         updater.cleanup_old()
         if self.cfg.get("auto_update", True) and updater.can_self_update():
             threading.Thread(target=self._update_loop, daemon=True).start()
@@ -420,28 +484,47 @@ class App(tk.Tk):
 
     # --- refresh loop ---------------------------------------------------
     def _arrange(self, live: list[Target]):
-        """Columns: as many as fit the width (more if rows wouldn't fit the height); card height fills the rest."""
+        """Tile the cards to fill the whole workspace.
+
+        Picks the column count whose tiles are closest to a comfortable wide shape without
+        getting too small; a short last row has its final card stretched across the gap.
+        """
         n = len(live)
         if not n:
             return
         gap = px(10)
         w, h = max(self.body.winfo_width(), 1), max(self.body.winfo_height(), 1)
-        min_h = px(140)
-        cols = max(1, min(n, w // px(440)))
-        while cols < n and math.ceil(n / cols) * (min_h + gap) > h:
-            cols += 1
-        rows = math.ceil(n / cols)
-        card_h = int(max(min_h, min(px(230), h / rows - gap)))
-        key = (cols, card_h, tuple(id(t) for t in live))
+        min_w, min_h = px(340), px(136)
+        best = None
+        for cols in range(1, n + 1):
+            rows = math.ceil(n / cols)
+            tw, th = (w - gap * cols) / cols, (h - gap * rows) / rows
+            too_small = (tw < min_w) + (th < min_h)
+            score = too_small * 10 + abs(math.log((tw / max(th, 1)) / 2.4)) + 0.15 * (cols * rows - n)
+            if best is None or score < best[0]:
+                best = (score, cols, rows)
+        _, cols, rows = best
+        key = (cols, tuple(id(t) for t in live))
         if key == self._layout_key:
             return
         self._layout_key = key
-        for i in range(max(cols, 8)):
-            self.body.columnconfigure(i, weight=1 if i < cols else 0)
+        for i in range(max(cols, 12)):
+            self.body.columnconfigure(i, weight=1 if i < cols else 0, uniform="col" if i < cols else "")
+        for i in range(max(rows, 40)):
+            self.body.rowconfigure(i, weight=1 if i < rows else 0, uniform="row" if i < rows else "")
         for i, t in enumerate(live):
-            card = self.cards[t]
-            card.config(height=card_h)
-            card.grid(row=i // cols, column=i % cols, sticky="new", padx=(0, gap), pady=(0, gap))
+            col = i % cols
+            span = cols - col if i == n - 1 else 1  # last card absorbs the empty cells in its row
+            self.cards[t].grid(row=i // cols, column=col, columnspan=span, sticky="nsew",
+                               padx=(0, gap), pady=(0, gap))
+
+    def _animate(self):
+        """~30 fps: slide every graph along with the clock."""
+        t0 = time.perf_counter()
+        now = time.time()
+        for card in self.cards.values():
+            card.plot(now, ease=True)
+        self.after(max(5, 33 - int((time.perf_counter() - t0) * 1000)), self._animate)
 
     def _tick(self):
         self._frame += 1
@@ -456,7 +539,7 @@ class App(tk.Tk):
                 self.cards[t] = Card(self.body, t, self._remove)
         self._arrange(live)
         for t in live:
-            self.cards[t].draw(self.cfg["window"], self._frame)
+            self.cards[t].draw(self.cfg["window"], self._frame, self.cfg["interval_ms"] / 1000)
 
         if self._updated_to and not self.update_btn.winfo_ismapped():
             self.update_btn.config(text=f"⬆  v{self._updated_to} installed – restart to apply")
