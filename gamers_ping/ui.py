@@ -2,10 +2,12 @@
 import ctypes
 import math
 import sys
+import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 
-from . import config
+from . import __version__, config, updater
 from .gamedetect import GameDetector
 from .monitor import Monitor, Target, compute_stats
 from .netinfo import is_admin
@@ -293,10 +295,14 @@ class App(tk.Tk):
         self.detector.start()
         self.cards: dict[Target, Card] = {}
         self._frame = 0
+        self._updated_to: str | None = None
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(50, self._style_titlebar)
         self.after(300, self._tick)
+        updater.cleanup_old()
+        if self.cfg.get("auto_update", True) and updater.can_self_update():
+            threading.Thread(target=self._update_loop, daemon=True).start()
 
     def _style_titlebar(self):
         """Dark caption bar on Windows 10 20H1+/11."""
@@ -316,6 +322,8 @@ class App(tk.Tk):
     def _build(self):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=px(16), pady=(px(10), px(2)))
+        self.update_btn = FlatButton(top, "", self._restart_for_update, bg=ACCENT, fg="#06121c",
+                                     hover=blend("#ffffff", ACCENT, 0.2), font=FONTS["ui_b"], padx=12, pady=4)
         self.chip = tk.Label(top, bg=BG, fg=GAME, font=FONTS["ui_b"], padx=px(12), pady=px(4))
         if not is_admin():
             FlatButton(top, "Run as admin for UDP game-server detection", self._elevate, bg=SURF, fg=MUTED,
@@ -336,6 +344,7 @@ class App(tk.Tk):
         self.host_in.pack(side="left", padx=px(8), ipady=px(4))
         FlatButton(bar, "+  Add target", self._add, bg=ACCENT, fg="#06121c", hover=blend("#ffffff", ACCENT, 0.2)).pack(side="left")
 
+        tk.Label(bar, text=f"v{__version__}", bg=SURF, fg=DIM, font=FONTS["tiny"]).pack(side="left", padx=(px(14), 0))
         self.interval_lbl = tk.Label(bar, bg=SURF, fg=FG, font=FONTS["ui_b"], width=8)
         FlatButton(bar, "+", lambda: self._step(+1), padx=10, pady=3).pack(side="right")
         self.interval_lbl.pack(side="right")
@@ -379,6 +388,21 @@ class App(tk.Tk):
             exe, args = sys.executable, "-m gamers_ping"
         if ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, None, 1) > 32:
             self._close()
+
+    def _update_loop(self):
+        while True:
+            try:
+                ver = updater.update_if_available()
+                if ver:
+                    self._updated_to = ver
+                    return
+            except Exception:  # offline, rate-limited, read-only install dir... try again later
+                pass
+            time.sleep(6 * 3600)
+
+    def _restart_for_update(self):
+        updater.restart()
+        self._close()
 
     def _games(self) -> dict[str, str]:
         games = dict(config.KNOWN_GAMES)
@@ -433,6 +457,10 @@ class App(tk.Tk):
         self._arrange(live)
         for t in live:
             self.cards[t].draw(self.cfg["window"], self._frame)
+
+        if self._updated_to and not self.update_btn.winfo_ismapped():
+            self.update_btn.config(text=f"⬆  v{self._updated_to} installed – restart to apply")
+            self.update_btn.pack(side="left", padx=(0, px(10)))
 
         d = self.detector
         if d.game is None:

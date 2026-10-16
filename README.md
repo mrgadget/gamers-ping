@@ -25,3 +25,9 @@ Built-in games: Call of Duty, Fortnite, Rust, CS2, Valorant, Apex, Overwatch 2, 
 ## Tests
 
 `python -m unittest discover -s tests`
+
+## Auto-update
+
+The exe checks the latest GitHub Release shortly after launch (then every 6 hours). If it's newer, it downloads
+`GamersPing.exe`, verifies size/SHA-256, swaps itself in while running, and shows a "restart to apply" button.
+Turn off with `"auto_update": false` in the config file. Publish a new version with `.\release.ps1 0.3.0`.

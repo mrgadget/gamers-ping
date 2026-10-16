@@ -37,6 +37,7 @@ KNOWN_GAMES = {
 DEFAULTS = {
     "interval_ms": 1000,
     "timeout_ms": 1000,
+    "auto_update": True,  # fetch new releases from GitHub in the background
     "window": 120,  # samples shown in each graph
     "targets": [{"name": "Google DNS", "host": "8.8.8.8"}],
     # Extra process names (exe) to treat as games, on top of KNOWN_GAMES.
