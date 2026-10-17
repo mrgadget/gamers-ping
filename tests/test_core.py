@@ -2,7 +2,7 @@ import struct
 import socket
 import unittest
 
-from gamers_ping.gamedetect import UdpSniffer, parse_ipv4_udp, is_public
+from gamers_ping.gamedetect import GameDetector, UdpSniffer, parse_ipv4_udp, is_public
 from gamers_ping.monitor import compute_stats
 from gamers_ping.netinfo import parse_default_gateway
 
@@ -38,6 +38,13 @@ class Core(unittest.TestCase):
         pkt = bytearray(udp_packet("1.1.1.1", "2.2.2.2", 1, 2))
         pkt[9] = 6
         self.assertIsNone(parse_ipv4_udp(bytes(pkt)))
+
+    def test_cod_exe_pattern(self):
+        d = GameDetector({"rustclient.exe": "Rust"}, lambda ips: None)
+        self.assertEqual(d._label("cod25-cod.exe"), "Call of Duty")
+        self.assertEqual(d._label("cod31-cod.exe"), "Call of Duty")
+        self.assertEqual(d._label("rustclient.exe"), "Rust")
+        self.assertIsNone(d._label("codec-cod.exe"))
 
     def test_public(self):
         self.assertTrue(is_public("8.8.8.8"))

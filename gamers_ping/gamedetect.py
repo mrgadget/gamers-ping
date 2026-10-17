@@ -9,6 +9,7 @@ the remote end of unconnected UDP sockets. So we:
 Without admin we fall back to the game's established public TCP peers.
 """
 import ipaddress
+import re
 import socket
 import struct
 import threading
@@ -17,6 +18,9 @@ import time
 import psutil
 
 from .netinfo import local_ip
+
+# Call of Duty's exe is renamed every year (cod22-cod.exe, cod25-cod.exe ...)
+PATTERNS = [(re.compile(r"^cod\d+-cod\.exe$"), "Call of Duty")]
 
 MAX_SERVERS = 3
 MIN_BYTES = 3000      # decayed byte score a peer needs to count as a server
@@ -139,10 +143,15 @@ class GameDetector(threading.Thread):
                 self.on_servers(servers)
             self._stop.wait(POLL_SECONDS)
 
+    def _label(self, exe: str) -> str | None:
+        if exe in self.games:
+            return self.games[exe]
+        return next((label for rx, label in PATTERNS if rx.match(exe)), None)
+
     def _poll(self) -> list[str]:
         pids: dict[int, str] = {}
         for p in psutil.process_iter(["name"]):
-            label = self.games.get((p.info["name"] or "").lower())
+            label = self._label((p.info["name"] or "").lower())
             if label:
                 pids[p.pid] = label
         if not pids:
