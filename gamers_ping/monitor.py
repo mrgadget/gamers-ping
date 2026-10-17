@@ -19,6 +19,7 @@ class Target:
         # Fallback when the host drops ICMP: ping the last router that answers instead.
         self.via: str | None = None
         self.via_hop: int | None = None
+        self.far_hop: int | None = None  # TTL of the farthest router that answered the trace
         self.hops: list[tuple[int, str]] = []  # candidate routers, nearest first
 
     def recent(self, n: int) -> list[float | None]:
@@ -127,6 +128,7 @@ class Monitor:
                         misses = 0
                     elif not any(v for _, v in t.samples):  # never answered: trace the path
                         t.hops = pinger.trace_hops(host)
+                        t.far_hop = t.hops[-1][0] if t.hops else None
                         if self._use_farthest_answering(t, pinger):
                             last_direct = time.monotonic()
                             t.samples.clear()

@@ -163,8 +163,11 @@ class Card(tk.Canvas):
             c.create_text(w - px(18), cy, text=tag, anchor="e", fill=GAME if is_game else DIM, font=FONTS["tag"])
         top = px(46)
         if t.via:
+            # We never learn the true hop count (the server is silent), only how far back from the
+            # farthest answering router we are, so this is a lower bound.
+            away = max(1, (t.far_hop or t.via_hop) - t.via_hop + 1)
             c.create_text(px(22), px(43), anchor="w", fill=WARN, font=FONTS["tiny"],
-                          text=f"Server blocks ping – measuring hop {t.via_hop} ({t.via})")
+                          text=f"Server blocks ping – router ≥{away} hop(s) from target ({t.via})")
             top = px(58)
 
         # geometry
